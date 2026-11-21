@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# gh-app-login: authenticate the GitHub CLI as a GitHub App installation.
+#
+# gh has no built-in GitHub App auth. This extension mints a JWT from the
+# app's private key, exchanges it for an installation access token, and
+# hands the token to gh (or prints it for you to use).
+#
+# Dependencies: bash, openssl, gh.
+
+set -euo pipefail
+
+VERSION="1.0.0"
+
+usage() {
+  cat <<'EOF'
+gh app-login - authenticate the GitHub CLI as a GitHub App installation
+
+USAGE
+  gh app-login --client-id <id> --installation-id <id> --key <pem> [--mode <mode>]
+
+FLAGS
+  --client-id <id>        The GitHub App's Client ID (starts with Iv).
+  --installation-id <id>  The app installation ID for the target account.
+  --key <path>            Path to the app's private key (.pem file).
+  --mode <mode>           What to do with the installation token:
+                            token   print the raw token only (default)
+                            export  print an 'export GH_TOKEN=...' line, for eval
+                            auth    persist it with 'gh auth login --with-token'
+  --version               Print version.
+  -h, --help              Show this help.
+
+EXAMPLES
+  # Use the app token in the current shell only
+  eval "$(gh app-login --client-id Iv23xxxx --installation-id 12345678 \
+      --key ~/secrets/my-app.pem --mode export)"
+
+  # Persist the app token as gh's github.com credential
+  gh app-login --client-id Iv23xxxx --installation-id 12345678 \
+      --key ~/secrets/my-app.pem --mode auth
+
+NOTES
+  Installation tokens expire after 1 hour. Re-run to mint a fresh one.
+  '--mode auth' replaces gh's stored github.com credential; use 'export'
+  mode if you want to keep your normal gh login and scope the app token
+  to one shell.
+EOF
+}
+
+err() {
+  printf 'gh app-login: %s\n' "$*" >&2
+}
+
+base64url() {
+  openssl base64 -e -A | tr '+/' '-_' | tr -d '='
+}
+
+# mint_jwt <key-path> <client-id> -> RS256 JWT on stdout
+mint_jwt() {
+  local key_path=$1 client_id=$2
+  local now iat exp header payload signing_input sig
+  now=$(date +%s)
+  iat=$((now - 60))
+  exp=$((now + 600))
+  header=$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | base64url)
+  payload=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$iat" "$exp" "$client_id" | base64url)
+  signing_input="${header}.${payload}"
+  sig=$(printf '%s' "$signing_input" | openssl dgst -sha256 -sign "$key_path" -binary | base64url)
+  printf '%s.%s' "$signing_input" "$sig"
+}
+
+# mint_installation_token <jwt> <installation-id> -> token on stdout
+mint_installation_token() {
+  local jwt=$1 installation_id=$2
+  gh api --method POST "/app/installations/${installation_id}/access_tokens" \
+    -H "Authorization: Bearer ${jwt}" \
+    -H "Accept: application/vnd.github+json" \
+    --jq '.token'
+}
+
+main() {
+  local client_id='' installation_id='' key_path='' mode='token'
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --client-id)       client_id=${2:?--client-id needs a value}; shift 2 ;;
+      --installation-id) installation_id=${2:?--installation-id needs a value}; shift 2 ;;
+      --key)             key_path=${2:?--key needs a value}; shift 2 ;;
+      --mode)            mode=${2:?--mode needs a value}; shift 2 ;;
+      --version)         printf '%s\n' "$VERSION"; return 0 ;;
+      -h|--help)         usage; return 0 ;;
+      *) err "unknown argument: $1"; usage >&2; return 2 ;;
+    esac
+  done
+
+  local missing=()
+  [[ -z "$client_id" ]]       && missing+=("--client-id")
+  [[ -z "$installation_id" ]] && missing+=("--installation-id")
+  [[ -z "$key_path" ]]        && missing+=("--key")
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    err "missing required flags: ${missing[*]}"
+    usage >&2
+    return 2
+  fi
+
+  case "$mode" in
+    token|export|auth) ;;
+    *) err "unknown --mode: $mode (want token, export or auth)"; return 2 ;;
+  esac
+
+  command -v openssl >/dev/null 2>&1 || { err "openssl is required but not found"; return 1; }
+  command -v gh >/dev/null 2>&1 || { err "gh CLI is required but not found"; return 1; }
+  [[ -r "$key_path" ]] || { err "cannot read private key: $key_path"; return 1; }
+
+  local jwt token
+  jwt=$(mint_jwt "$key_path" "$client_id")
+  token=$(mint_installation_token "$jwt" "$installation_id")
+
+  if [[ -z "$token" ]]; then
+    err "token exchange returned an empty token"
+    return 1
+  fi
+
+  case "$mode" in
+    token)
+      printf '%s\n' "$token"
+      ;;
+    export)
+      printf 'export GH_TOKEN=%s\n' "$token"
+      ;;
+    auth)
+      printf '%s' "$token" | gh auth login --with-token
+      err "gh now authenticates to github.com as the app installation."
+      err "The token expires in 1 hour; re-run gh app-login to refresh."
+      ;;
+  esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi
