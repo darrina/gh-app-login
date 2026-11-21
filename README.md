@@ -90,13 +90,21 @@ fresh one.
 
 ### Attributing commits to the app bot
 
-With `GH_TOKEN` set (or `--mode auth` done), git pushes over HTTPS authenticate as the
-app. Set the commit author to match:
+Keep the installation token out of the remote URL. Putting a token in a URL stores it in plaintext in `.git/config` and can expose it in remote listings. `GH_TOKEN` is used by `gh` commands in the current shell. For Git over HTTPS, use the GitHub CLI credential helper so Git gets the token without embedding it in the remote.
+
+The setup below scopes the helper configuration to this repository's `.git/config`, leaving your global Git configuration and normal `gh` login alone. The exported `GH_TOKEN` is available to `gh` and its Git credential helper only in this shell.
 
 ```sh
+eval "$(gh app-login --client-id <client-id> --installation-id <installation-id> \
+    --key ~/secrets/<app-slug>.pem --mode export)"
+GIT_CONFIG_GLOBAL="$(git rev-parse --git-path config)" gh auth setup-git --hostname github.com --force
+git remote set-url origin https://github.com/<owner>/<repo>.git
 git config user.name "<app-slug>[bot]"
-git remote set-url origin https://x-access-token:${GH_TOKEN}@github.com/<owner>/<repo>.git
+git push
+git pull
 ```
+
+Do not use `gh auth login --with-token` for this flow. That would persist the app token as a regular GitHub CLI login instead of keeping it in `GH_TOKEN` for the current shell.
 
 ## How it works
 
