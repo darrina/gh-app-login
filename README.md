@@ -31,24 +31,37 @@ gh extension upgrade app-login
 gh extension remove app-login
 ```
 
-## One-time setup per app
+## Setting up an app
 
-1. Open the app's settings page (`https://github.com/settings/apps/<app-slug>`) and
-   select **Generate a private key**. GitHub downloads a `.pem` file.
-2. Store the `.pem` somewhere secret: a password manager or vault.
-   **Never commit it, never paste it into chat.**
-3. Note the app's **Client ID** (top of the same settings page) and the
-   **installation ID** (open `https://github.com/settings/installations`, click
-   *Configure* on the app; the ID is the last number in the URL).
+`gh app-login` needs three things per app:
 
-### Apps in the darrina account
+- the app's **Client ID**
+- the app's **installation ID** for the account it is installed on
+- the app's **private key** (a `.pem` file)
 
-| Agent            | App             | Client ID             | Installation ID | Installed on          |
-| ---------------- | --------------- | --------------------- | --------------- | --------------------- |
-| Sluggo (Instinct) | `instinct-app`  | `Iv23li59qRQP3gREuVaL` | `184348145`     | `darrina/santi-systems` |
-| Marco (Muse)     | `marco-muse-app` | `Iv23liandSy4nz2MQhbw` | `184348020`     | `darrina/santi-systems` |
+### Creating a new GitHub App
 
-These identifiers are not secrets, but they are useless without each app's private key.
+1. Open <https://github.com/settings/apps/new> (Settings, then Developer settings,
+   then GitHub Apps, then **New GitHub App**).
+2. Name the app and set a homepage URL (any URL works; the target repo is fine).
+   Under **Webhook**, uncheck **Active** unless the app really needs events.
+3. Under **Repository permissions**, grant only what the agent needs. For commit and
+   PR work: **Contents** = *Read and write* and **Pull requests** = *Read and write*.
+4. Set **Where can this GitHub App be installed?** to *Only on this account* and
+   click **Create GitHub App**.
+5. From the app's settings page, choose **Install App**, pick the account, and
+   select only the repositories the agent should touch.
+
+### Retrieving the credentials
+
+- **Client ID**: shown at the top of the app's settings page
+  (`https://github.com/settings/apps/<app-slug>`).
+- **Private key**: on the app's settings page, go to **Credentials**, then
+  **Key pairs**, and click **New key**. GitHub downloads a `.pem` file; this is the
+  only time it is available. Store it somewhere secret, like a password manager or
+  vault. **Never commit it, never paste it into chat.**
+- **Installation ID**: open `https://github.com/settings/installations`, click
+  *Configure* on the app; the ID is the last number in the URL.
 
 ## Usage
 
@@ -63,8 +76,8 @@ Modes:
   app token to the current shell:
 
   ```sh
-  eval "$(gh app-login --client-id Iv23liandSy4nz2MQhbw --installation-id 184348020 \
-      --key ~/secrets/marco-muse-app.pem --mode export)"
+  eval "$(gh app-login --client-id <client-id> --installation-id <installation-id> \
+      --key ~/secrets/<app-slug>.pem --mode export)"
   ```
 
 - `--mode auth`: persist the token with `gh auth login --with-token`, so every `gh`
@@ -77,13 +90,21 @@ fresh one.
 
 ### Attributing commits to the app bot
 
-With `GH_TOKEN` set (or `--mode auth` done), git pushes over HTTPS authenticate as the
-app. Set the commit author to match:
+Keep the installation token out of the remote URL. Putting a token in a URL stores it in plaintext in `.git/config` and can expose it in remote listings. `GH_TOKEN` is used by `gh` commands in the current shell. For Git over HTTPS, use the GitHub CLI credential helper so Git gets the token without embedding it in the remote.
+
+The setup below scopes the helper configuration to this repository's `.git/config`, leaving your global Git configuration and normal `gh` login alone. The exported `GH_TOKEN` is available to `gh` and its Git credential helper only in this shell.
 
 ```sh
-git config user.name "marco-muse-app[bot]"
-git remote set-url origin https://x-access-token:${GH_TOKEN}@github.com/darrina/santi-systems.git
+eval "$(gh app-login --client-id <client-id> --installation-id <installation-id> \
+    --key ~/secrets/<app-slug>.pem --mode export)"
+GIT_CONFIG_GLOBAL="$(git rev-parse --git-path config)" gh auth setup-git --hostname github.com --force
+git remote set-url origin https://github.com/<owner>/<repo>.git
+git config user.name "<app-slug>[bot]"
+git push
+git pull
 ```
+
+Do not use `gh auth login --with-token` for this flow. That would persist the app token as a regular GitHub CLI login instead of keeping it in `GH_TOKEN` for the current shell.
 
 ## How it works
 
